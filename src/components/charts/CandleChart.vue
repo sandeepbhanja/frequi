@@ -1,60 +1,64 @@
 <script setup lang="ts">
-import type { ChartSliderPosition, IndicatorConfig, PairHistory, PlotConfig, Trade } from '@/types';
-import { ChartType } from '@/types';
-
-import ECharts from 'vue-echarts';
-
-import type { EChartsOption, ScatterSeriesOption } from 'echarts';
-import { BarChart, CandlestickChart, LineChart, ScatterChart } from 'echarts/charts';
+import type { ChartSliderPosition, PairHistory, PlotConfig, Trade } from '@/types';
 import {
-  AxisPointerComponent,
-  CalendarComponent,
-  DataZoomComponent,
-  DatasetComponent,
-  GridComponent,
-  LegendComponent,
-  TimelineComponent,
-  TitleComponent,
-  ToolboxComponent,
-  TooltipComponent,
-  VisualMapComponent,
-  VisualMapPiecewiseComponent,
-  MarkAreaComponent,
-  MarkLineComponent,
-  MarkPointComponent,
-  GraphicComponent,
-} from 'echarts/components';
-import { use } from 'echarts/core';
-import { CanvasRenderer } from 'echarts/renderers';
+  subscribeBinanceCandles,
+  type binanceCandleMarket,
+  type CandleConnection,
+} from '@/utils/charts/binanceCandles';
+import abcd from '@klinecharts/extension/overlays/abcd';
+import arrow from '@klinecharts/extension/overlays/arrow';
+import circle from '@klinecharts/extension/overlays/circle';
+import eightWaves from '@klinecharts/extension/overlays/eightWaves';
+import fibonacciCircle from '@klinecharts/extension/overlays/fibonacciCircle';
+import fibonacciExtension from '@klinecharts/extension/overlays/fibonacciExtension';
+import fibonacciSegment from '@klinecharts/extension/overlays/fibonacciSegment';
+import fibonacciSpeedResistanceFan from '@klinecharts/extension/overlays/fibonacciSpeedResistanceFan';
+import fibonacciSpiral from '@klinecharts/extension/overlays/fibonacciSpiral';
+import fiveWaves from '@klinecharts/extension/overlays/fiveWaves';
+import gannBox from '@klinecharts/extension/overlays/gannBox';
+import measure from '@klinecharts/extension/overlays/measure';
+import rect from '@klinecharts/extension/overlays/rect';
+import threeWaves from '@klinecharts/extension/overlays/threeWaves';
+import triangle from '@klinecharts/extension/overlays/triangle';
+import xabcd from '@klinecharts/extension/overlays/xabcd';
+import {
+  dispose,
+  init,
+  registerIndicator,
+  registerOverlay,
+  type CandleType,
+  type Chart,
+  type KLineData,
+  type IndicatorTemplate,
+  type Overlay,
+  type OverlayMode,
+  type Period,
+  type Point,
+} from 'klinecharts';
 
-use([
-  AxisPointerComponent,
-  CalendarComponent,
-  DatasetComponent,
-  DataZoomComponent,
-  GridComponent,
-  LegendComponent,
-  TimelineComponent,
-  TitleComponent,
-  ToolboxComponent,
-  TooltipComponent,
-  VisualMapComponent,
-  VisualMapPiecewiseComponent,
-  MarkAreaComponent,
-  MarkLineComponent,
-  MarkPointComponent,
-
-  CandlestickChart,
-  BarChart,
-  LineChart,
-  ScatterChart,
-  CanvasRenderer,
-  GraphicComponent,
-]);
+[
+  abcd,
+  arrow,
+  circle,
+  eightWaves,
+  fibonacciCircle,
+  fibonacciExtension,
+  fibonacciSegment,
+  fibonacciSpeedResistanceFan,
+  fibonacciSpiral,
+  fiveWaves,
+  gannBox,
+  measure,
+  rect,
+  threeWaves,
+  triangle,
+  xabcd,
+].forEach((overlay) => registerOverlay(overlay));
 
 const props = defineProps<{
   trades: Trade[];
   dataset: PairHistory;
+  liveMarket?: ReturnType<typeof binanceCandleMarket>;
   heikinAshi: boolean;
   showMarkArea: boolean;
   useUTC: boolean;
@@ -67,692 +71,784 @@ const props = defineProps<{
   startCandleCount: number;
 }>();
 
-const isLabelLeft = computed(() => props.labelSide === 'left');
-// Chart default options
-const MARGINLEFT = isLabelLeft.value ? '5.5%' : '1%';
-const MARGINRIGHT = isLabelLeft.value ? '1%' : '5.5%';
-const NAMEGAP = 55;
-const SUBPLOTHEIGHT = 8; // Value in %
-// minimal helpers for debugging
-const showAxisLine = false;
+type PriceChartType = CandleType | 'line' | 'heikin_ashi';
+type SavedDrawing = { name: string; points: Array<Partial<Point>>; extendData?: unknown };
 
-// Candle Colors
-const upColor = props.colorUp;
-const upBorderColor = props.colorUp;
-const downColor = props.colorDown;
-const downBorderColor = props.colorDown;
+const chartHost = useTemplateRef<HTMLElement>('chartHost');
+const chartShell = useTemplateRef<HTMLElement>('chartShell');
+const chart = shallowRef<Chart | null>(null);
+const liveEnabled = ref(true);
+const connection = ref<CandleConnection>('Connecting');
+const marketBars = new Map<number, KLineData>();
+let lastRawBar: KLineData | undefined;
+let pushBar: ((bar: KLineData) => void) | undefined;
+const resizeObserver = shallowRef<ResizeObserver | null>(null);
+const isFullscreen = ref(false);
+const drawingsLocked = ref(false);
+const overlayMode = ref<OverlayMode>('weak_magnet');
+const selectedDrawing = ref('segment');
+const selectedIndicator = ref('MACD');
+const activeIndicators = ref<string[]>(['MA', 'VOL']);
+const chartType = ref<PriceChartType>(props.heikinAshi ? 'heikin_ashi' : 'candle_solid');
 
-// Buy / Sell Signal Colors
-const buySignalColor = '#00ff26';
-const shortEntrySignalColor = '#00ff26';
-const sellSignalColor = '#faba25';
-const shortexitSignalColor = '#faba25';
+const chartTypeOptions: Array<{ label: string; value: PriceChartType }> = [
+  { label: 'Candles', value: 'candle_solid' },
+  { label: 'Hollow candles', value: 'candle_stroke' },
+  { label: 'Hollow up', value: 'candle_up_stroke' },
+  { label: 'OHLC bars', value: 'ohlc' },
+  { label: 'Heikin Ashi', value: 'heikin_ashi' },
+  { label: 'Area', value: 'area' },
+  { label: 'Line', value: 'line' },
+];
 
-const candleChart = useTemplateRef<InstanceType<typeof ECharts>>('candleChart');
-const chartOptions = shallowRef<EChartsOption>({});
+const mainPaneIndicators = new Set(['MA', 'EMA', 'SMA', 'BOLL', 'SAR', 'BBI', 'AVP']);
+const indicatorOptions = [
+  'MA',
+  'EMA',
+  'SMA',
+  'BOLL',
+  'SAR',
+  'BBI',
+  'AVP',
+  'VOL',
+  'MACD',
+  'RSI',
+  'KDJ',
+  'DMI',
+  'CCI',
+  'AO',
+  'BIAS',
+  'BRAR',
+  'CR',
+  'DMA',
+  'EMV',
+  'MTM',
+  'OBV',
+  'PVT',
+  'PSY',
+  'ROC',
+  'TRIX',
+  'VR',
+];
 
-const strategy = computed(() => {
-  return props.dataset ? props.dataset.strategy : '';
-});
+const drawingGroups = [
+  {
+    label: 'Lines',
+    items: [
+      ['Trend line', 'segment'],
+      ['Ray', 'rayLine'],
+      ['Extended line', 'straightLine'],
+      ['Horizontal line', 'horizontalStraightLine'],
+      ['Horizontal ray', 'horizontalRayLine'],
+      ['Vertical line', 'verticalStraightLine'],
+      ['Parallel channel', 'priceChannelLine'],
+      ['Parallel lines', 'parallelStraightLine'],
+      ['Price line', 'priceLine'],
+    ],
+  },
+  {
+    label: 'Fibonacci',
+    items: [
+      ['Fib retracement', 'fibonacciLine'],
+      ['Fib extension', 'fibonacciExtension'],
+      ['Fib segment', 'fibonacciSegment'],
+      ['Fib fan', 'fibonacciSpeedResistanceFan'],
+      ['Fib circle', 'fibonacciCircle'],
+      ['Fib spiral', 'fibonacciSpiral'],
+    ],
+  },
+  {
+    label: 'Shapes & analysis',
+    items: [
+      ['Brush', 'brush'],
+      ['Rectangle', 'rect'],
+      ['Circle', 'circle'],
+      ['Triangle', 'triangle'],
+      ['Arrow', 'arrow'],
+      ['Measure', 'measure'],
+      ['Gann box', 'gannBox'],
+      ['ABCD pattern', 'abcd'],
+      ['XABCD pattern', 'xabcd'],
+      ['3 waves', 'threeWaves'],
+      ['5 waves', 'fiveWaves'],
+      ['8 waves', 'eightWaves'],
+    ],
+  },
+];
 
-const pair = computed(() => {
-  return props.dataset ? props.dataset.pair : '';
-});
+const chartStateKey = 'frequi-pro-chart-state';
+const drawingStorageKey = computed(() => `frequi-chart-drawings:${props.dataset.pair}`);
 
-const timeframe = computed(() => {
-  return props.dataset ? props.dataset.timeframe : '';
-});
-
-const hasData = computed(() => {
-  return props.dataset !== null && typeof props.dataset === 'object';
-});
-
-const filteredTrades = computed(() => {
-  return props.trades.filter((item: Trade) => item.pair === pair.value);
-});
-
-const chartTitle = computed(() => {
-  return `${strategy.value} - ${pair.value} - ${timeframe.value}`;
-});
-
-const diffCols = computed(() => {
-  return getDiffColumnsFromPlotConfig(props.plotConfig);
-});
-
-usePercentageTool(
-  candleChart,
-  toRef(() => props.theme),
-  toRef(() => props.dataset.timeframe_ms),
-);
-
-const { formatCandleTooltip } = useCandleChartTooltip(chartOptions);
-
-function addLegend(name: string, position: number | undefined = undefined) {
-  if (
-    !chartOptions.value.legend ||
-    Array.isArray(chartOptions.value.legend) ||
-    !Array.isArray(chartOptions.value.legend.data)
-  )
-    return;
-  if (!chartOptions.value.legend.data.includes(name)) {
-    if (position !== undefined) {
-      chartOptions.value.legend.data.splice(position, 0, name);
-    } else {
-      chartOptions.value.legend.data.push(name);
-    }
-  }
+function timeframeToPeriod(timeframe: string): Period {
+  const match = timeframe.match(/^(\d+)([smhdwM])$/);
+  if (!match) return { span: 1, type: 'minute' };
+  const span = Number(match[1]);
+  const unit = match[2];
+  const type =
+    unit === 's'
+      ? 'second'
+      : unit === 'm'
+        ? 'minute'
+        : unit === 'h'
+          ? 'hour'
+          : unit === 'd'
+            ? 'day'
+            : unit === 'w'
+              ? 'week'
+              : 'month';
+  return { span, type };
 }
 
-function updateChart(initial = false) {
-  if (!hasData.value) {
-    return;
-  }
-  if (chartOptions.value?.title) {
-    chartOptions.value.title[0].text = chartTitle.value;
-  }
-  // Avoid mutation of dataset.columns array
-  const columns = props.dataset.columns.slice();
+function column(name: string) {
+  return props.dataset.columns.findIndex((item) => item === name);
+}
 
-  const colDate = columns.findIndex((el) => el === '__date_ts');
-  const colOpen = columns.findIndex((el) => el === 'open');
-  const colHigh = columns.findIndex((el) => el === 'high');
-  const colLow = columns.findIndex((el) => el === 'low');
-  const colClose = columns.findIndex((el) => el === 'close');
-  const colVolume = columns.findIndex((el) => el === 'volume');
-  const colEnterTag = columns.findIndex((el) => el === 'enter_tag');
-  const colExitTag = columns.findIndex((el) => el === 'exit_tag');
-
-  const colEntryData = columns.findIndex(
-    (el) => el === '_buy_signal_close' || el === '_enter_long_signal_close',
-  );
-  const colExitData = columns.findIndex(
-    (el) => el === '_sell_signal_close' || el === '_exit_long_signal_close',
-  );
-
-  const colShortEntryData = columns.findIndex((el) => el === '_enter_short_signal_close');
-  const colShortExitData = columns.findIndex((el) => el === '_exit_short_signal_close');
-
-  const subplotCount =
-    'subplots' in props.plotConfig ? Object.keys(props.plotConfig.subplots).length + 1 : 1;
-
-  if (Array.isArray(chartOptions.value?.dataZoom)) {
-    // Only set zoom once ...
-    if (initial) {
-      // Add 2 candles to the initial zoom to allow for a "scroll past" effect
-      const startingZoom = (1 - (props.startCandleCount + 2) / props.dataset.length) * 100;
-      chartOptions.value.dataZoom.forEach((el, i) => {
-        if (chartOptions.value && chartOptions.value.dataZoom) {
-          chartOptions.value.dataZoom[i].start = startingZoom;
-        }
-      });
-    } else {
-      // Remove start/end settings after chart initialization to avoid chart resetting
-      chartOptions.value.dataZoom.forEach((el, i) => {
-        if (chartOptions.value && chartOptions.value.dataZoom) {
-          delete chartOptions.value.dataZoom[i].start;
-          delete chartOptions.value.dataZoom[i].end;
-        }
-      });
-    }
-  }
-  let dataset = props.heikinAshi
-    ? heikinAshiDataset(columns, props.dataset.data)
-    : props.dataset.data.slice();
-
-  diffCols.value.forEach(([colFrom, colTo]) => {
-    if (colFrom && colTo) {
-      // Enhance dataset with diff columns for area plots
-      dataset = calculateDiff(columns, dataset, colFrom, colTo);
-    }
-  });
-  // Add new rows to end to allow slight "scroll past"
-  const scrollPastLength = 5;
-  const lastColDate = dataset[dataset.length - 1]?.[colDate];
-  if (lastColDate) {
-    const newArray = Array(scrollPastLength);
-    newArray[colDate] = lastColDate + props.dataset.timeframe_ms * scrollPastLength;
-    dataset.push(newArray);
-  }
-
-  const options: EChartsOption = {
-    dataset: {
-      source: dataset,
-    },
-    grid: [
-      {
-        left: MARGINLEFT,
-        right: MARGINRIGHT,
-        // Grid Layout from bottom to top
-        bottom: `${subplotCount * SUBPLOTHEIGHT + 2}%`,
-      },
-      {
-        // Volume
-        left: MARGINLEFT,
-        right: MARGINRIGHT,
-        // Grid Layout from bottom to top
-        bottom: `${subplotCount * SUBPLOTHEIGHT}%`,
-        height: `${SUBPLOTHEIGHT}%`,
-      },
-    ],
-
-    series: [
-      {
-        name: 'Candles',
-        type: 'candlestick',
-        barWidth: '80%',
-        itemStyle: {
-          color: upColor,
-          color0: downColor,
-          borderColor: upBorderColor,
-          borderColor0: downBorderColor,
-        },
-        encode: {
-          x: colDate,
-          // open, close, low, high
-          y: [colOpen, colClose, colLow, colHigh],
-        },
-      },
-      {
-        name: 'Volume',
-        type: 'bar',
-        xAxisIndex: 1,
-        yAxisIndex: 1,
-        itemStyle: {
-          color: '#777777',
-        },
-        large: true,
-        encode: {
-          x: colDate,
-          y: colVolume,
-        },
-      },
-    ],
-    xAxis: [
-      {
-        type: 'time',
-        axisLine: { onZero: false },
-        axisTick: { show: true },
-        axisLabel: { show: true },
-        axisPointer: {
-          label: { show: false },
-        },
-        position: 'top',
-        splitLine: { show: false },
-        splitNumber: 20,
-        min: 'dataMin',
-        max: 'dataMax',
-      },
-      {
-        type: 'time',
-        gridIndex: 1,
-        axisLine: { onZero: false },
-        axisTick: { show: false },
-        axisLabel: { show: false },
-        axisPointer: {
-          label: { show: false },
-        },
-        splitLine: { show: false },
-        splitNumber: 20,
-        min: 'dataMin',
-        max: 'dataMax',
-      },
-    ],
-    yAxis: [
-      {
-        scale: true,
-        max: (value) => {
-          return formatDecimal(value.max + (value.max - value.min) * 0.02, 'en-EN');
-        },
-        min: (value) => {
-          return formatDecimal(value.min - (value.max - value.min) * 0.04, 'en-EN');
-        },
-        name: ' ', // Necessary to avoid layout shift
-        nameLocation: 'middle',
-        nameGap: NAMEGAP,
-        axisLine: { show: showAxisLine },
-        axisLabel: {
-          hideOverlap: true,
-          overflow: 'truncate',
-        },
-        position: props.labelSide,
-      },
-      {
-        scale: true,
-        gridIndex: 1,
-        splitNumber: 2,
-        name: 'volume',
-        nameLocation: 'middle',
-        position: props.labelSide,
-        nameGap: NAMEGAP,
-        axisLabel: { show: false },
-        axisLine: { show: showAxisLine },
-        axisTick: { show: false },
-        splitLine: { show: false },
-      },
-    ],
+function rawData(): KLineData[] {
+  const indexes = {
+    timestamp: column('__date_ts'),
+    open: column('open'),
+    high: column('high'),
+    low: column('low'),
+    close: column('close'),
+    volume: column('volume'),
   };
-
-  if (Array.isArray(options.series)) {
-    const areaSeries = generateMarkAreaSeries(
-      props.dataset,
-      props.showMarkArea,
-      props.plotConfig.options?.markAreaZIndex,
-    );
-
-    if (areaSeries) {
-      options.series.push(areaSeries);
-    }
-    const signalConfigs = [
-      {
-        colData: colEntryData,
-        name: 'Entry',
-        symbol: 'triangle',
-        symbolSize: 10,
-        color: buySignalColor,
-        tooltipPrefix: 'Long entry',
-        colTooltip: colEnterTag,
-      },
-      {
-        colData: colExitData,
-        name: 'Exit',
-        symbol: 'diamond',
-        symbolSize: 8,
-        color: sellSignalColor,
-        tooltipPrefix: 'Long exit',
-        colTooltip: colExitTag,
-      },
-      {
-        colData: colShortEntryData,
-        name: 'Entry',
-        symbol: 'triangle',
-        symbolSize: 10,
-        symbolRotate: 180,
-        color: shortEntrySignalColor,
-        tooltipPrefix: 'Short entry',
-        colTooltip: colEnterTag,
-      },
-      {
-        colData: colShortExitData,
-        name: 'Exit',
-        symbol: 'pin',
-        symbolSize: 8,
-        color: shortexitSignalColor,
-        tooltipPrefix: 'Short exit',
-        colTooltip: colExitTag,
-      },
-    ];
-
-    for (const signal of signalConfigs) {
-      if (signal.colData >= 0) {
-        options.series.push({
-          name: signal.name,
-          type: 'scatter',
-          symbol: signal.symbol,
-          symbolSize: signal.symbolSize,
-          symbolRotate: signal.symbolRotate ?? 0,
-          xAxisIndex: 0,
-          yAxisIndex: 0,
-          itemStyle: {
-            color: signal.color,
-          },
-          tooltip: {
-            valueFormatter: (value) => {
-              if (Array.isArray(value)) {
-                if (value.length > 0 && value[0]) {
-                  // If tag column number gets too high, we get the full list as second argument (for no good reason)
-                  const tag = Array.isArray(value[1])
-                    ? value[1][signal.colTooltip]?.toString()
-                    : value[1]?.toString();
-                  const tagShort = tag.substring(0, 100);
-
-                  // Show both prefix and tag
-                  // Value would be in value[0] - but we don't show this to avoid showing the same data multiple times as it would correspond to the close price of the candle.
-                  return `${signal.tooltipPrefix} ${tagShort ? `(${tagShort})` : ''}`;
-                }
-                // fall back to empty output if tag ain't set.
-                return '';
-              }
-              // Fallback for single value
-              return value ? `${signal.tooltipPrefix} ${value}` : '';
-            },
-          },
-          encode: {
-            x: colDate,
-            y: signal.colData,
-            tooltip:
-              signal.colTooltip >= 0 ? [signal.colData, signal.colTooltip] : [signal.colData],
-          },
-        });
-      }
-    }
-  }
-
-  if ('main_plot' in props.plotConfig) {
-    Object.entries(props.plotConfig.main_plot).forEach(([key, value]) => {
-      const col = columns.findIndex((el) => el === key);
-      if (col > 0) {
-        addLegend(key);
-        if (Array.isArray(options.series)) {
-          options.series.push(generateCandleSeries(colDate, col, key, value));
-
-          if (value.fill_to) {
-            // Assign
-            const fillColKey = `${key}-${value.fill_to}`;
-            const fillCol = columns.findIndex((el) => el === fillColKey);
-            const fillValue: IndicatorConfig = {
-              color: value.color,
-              type: ChartType.line,
-            };
-            const areaSeries = generateAreaCandleSeries(colDate, fillCol, key, fillValue, 0);
-
-            const currentSeries = options.series[options.series.length - 1];
-            if (currentSeries) {
-              currentSeries['stack'] = key;
-            }
-            options.series.push(areaSeries);
-          }
-          options.series.splice(options.series.length - 1, 0);
-        }
-      } else {
-        console.log(`element ${key} for main plot not found in columns.`);
-      }
-    });
-  }
-
-  // START Subplots
-  if ('subplots' in props.plotConfig) {
-    let plotIndex = 2;
-    Object.entries(props.plotConfig.subplots).forEach(([key, value]) => {
-      // define yaxis
-
-      // Subplots are added from bottom to top - only the "bottom-most" plot stays at the bottom.
-      // const currGridIdx = totalSubplots - plotIndex > 1 ? totalSubplots - plotIndex : plotIndex;
-      const currGridIdx = plotIndex;
-      if (Array.isArray(options.yAxis) && options.yAxis.length <= plotIndex) {
-        options.yAxis.push({
-          scale: true,
-          gridIndex: currGridIdx,
-          name: key,
-          position: props.labelSide,
-          nameLocation: 'middle',
-          nameGap: NAMEGAP,
-          axisLabel: {
-            show: true,
-            hideOverlap: true,
-            overflow: 'truncate',
-          },
-          axisLine: { show: showAxisLine },
-          axisTick: { show: false },
-          splitLine: { show: false },
-        });
-      }
-      if (Array.isArray(options.xAxis) && options.xAxis.length <= plotIndex) {
-        options.xAxis.push({
-          type: 'time',
-          gridIndex: currGridIdx,
-          axisLine: { onZero: false },
-          axisTick: { show: false },
-          axisLabel: { show: false },
-          axisPointer: {
-            label: { show: false },
-          },
-          splitLine: { show: false },
-          splitNumber: 20,
-        });
-      }
-      if (Array.isArray(chartOptions.value.dataZoom)) {
-        // Must be set on the chartOptions object - options doesn't have dataZoom at this point
-        chartOptions.value.dataZoom.forEach((el) =>
-          el.xAxisIndex && Array.isArray(el.xAxisIndex) ? el.xAxisIndex.push(plotIndex) : null,
-        );
-      }
-      if (options.grid && Array.isArray(options.grid)) {
-        options.grid.push({
-          left: MARGINLEFT,
-          right: MARGINRIGHT,
-          bottom: `${(subplotCount - plotIndex + 1) * SUBPLOTHEIGHT}%`,
-          height: `${SUBPLOTHEIGHT}%`,
-        });
-      }
-      Object.entries(value).forEach(([sk, sv]) => {
-        // entries per subplot
-        const col = columns.findIndex((el) => el === sk);
-        if (col > 0) {
-          addLegend(sk);
-          if (options.series && Array.isArray(options.series)) {
-            options.series.push(generateCandleSeries(colDate, col, sk, sv, plotIndex));
-            if (sv.fill_to) {
-              // Assign
-              const fillColKey = `${sk}-${sv.fill_to}`;
-              const fillCol = columns.findIndex((el) => el === fillColKey);
-              const fillValue: IndicatorConfig = {
-                color: sv.color,
-                type: ChartType.line,
-              };
-              const areaSeries = generateAreaCandleSeries(
-                colDate,
-                fillCol,
-                sk,
-                fillValue,
-                plotIndex,
-              );
-              const currentSeries = options.series[options.series.length - 1];
-              if (currentSeries) {
-                currentSeries['stack'] = sk;
-              }
-              options.series.push(areaSeries);
-            }
-            options.series.splice(options.series.length - 1, 0);
-          }
-        } else {
-          console.log(`element ${sk} was not found in the columns.`);
-        }
+  return props.dataset.data
+    .map((row) => {
+      const item: KLineData = {
+        timestamp: Number(row[indexes.timestamp]),
+        open: Number(row[indexes.open]),
+        high: Number(row[indexes.high]),
+        low: Number(row[indexes.low]),
+        close: Number(row[indexes.close]),
+        volume: Number(row[indexes.volume] ?? 0),
+      };
+      props.dataset.columns.forEach((key, index) => {
+        item[key] = row[index];
       });
+      return item;
+    })
+    .filter((item) => Number.isFinite(item.timestamp) && Number.isFinite(item.close))
+    .sort((a, b) => a.timestamp - b.timestamp);
+}
 
-      plotIndex += 1;
-    });
-  }
-  // END Subplots
-  // Last subplot should show xAxis labels
-  // if (options.xAxis && Array.isArray(options.xAxis)) {
-  //   options.xAxis[options.xAxis.length - 1].axisLabel.show = true;
-  //   options.xAxis[options.xAxis.length - 1].axisTick.show = true;
-  // }
-  if (Array.isArray(options.grid)) {
-    // Last subplot is bottom
-    const localGrid = options.grid[options.grid.length - 1];
-    if (localGrid) {
-      // Last subplot is bottom
-      localGrid.bottom = '50px';
-      delete localGrid.top;
-    }
-  }
-
-  const nameTrades = 'Trades';
-  // Insert trades into legend, after the default columns
-  addLegend(nameTrades, 4);
-  const tradesSeries: ScatterSeriesOption = generateTradeSeries(
-    nameTrades,
-    props.theme,
-    props.dataset,
-    filteredTrades.value,
-  );
-  if (Array.isArray(options.series)) {
-    options.series.push(tradesSeries);
-  }
-
-  // Merge this into original data
-  Object.assign(chartOptions.value, options);
-  // console.log('chartOptions', chartOptions.value);
-  candleChart.value?.setOption(chartOptions.value, {
-    replaceMerge: ['series', 'grid', 'yAxis', 'xAxis', 'legend'],
-    notMerge: initial,
+function convertHeikinAshi(data: KLineData[]): KLineData[] {
+  let previousOpen: number | undefined;
+  let previousClose: number | undefined;
+  return data.map((item) => {
+    const close = (item.open + item.high + item.low + item.close) / 4;
+    const open =
+      previousOpen === undefined || previousClose === undefined
+        ? (item.open + item.close) / 2
+        : (previousOpen + previousClose) / 2;
+    previousOpen = open;
+    previousClose = close;
+    return {
+      ...item,
+      open,
+      close,
+      high: Math.max(item.high, open, close),
+      low: Math.min(item.low, open, close),
+    };
   });
 }
 
-function initializeChartOptions() {
-  // Ensure we start empty.
-  candleChart.value?.setOption({}, { notMerge: true });
-
-  chartOptions.value = {
-    title: [
-      {
-        // text: this.chartTitle,
-        show: false,
-      },
-    ],
-    backgroundColor: 'rgba(0, 0, 0, 0)',
-    useUTC: props.useUTC,
-    animation: false,
-    legend: {
-      // Initial legend, further entries are pushed to the below list
-      data: ['Candles', 'Volume', 'Entry', 'Exit'],
-      right: '1%',
-      top: 0,
-      type: 'scroll',
-      pageTextStyle: {
-        color: props.theme === 'dark' ? '#dedede' : '#333',
-      },
-      pageIconColor: props.theme === 'dark' ? '#aaa' : '#2f4554',
-      pageIconInactiveColor: props.theme === 'dark' ? '#2f4554' : '#aaa',
-    },
-    tooltip: {
-      show: true,
-      trigger: 'axis',
-      renderMode: 'html',
-      formatter: formatCandleTooltip,
-      backgroundColor: 'rgba(80,80,80,0.7)',
-      borderWidth: 0,
-      textStyle: {
-        color: '#fff',
-      },
-      axisPointer: {
-        type: 'cross',
-        lineStyle: {
-          color: '#cccccc',
-          width: 1,
-          opacity: 1,
-        },
-      },
-      // positioning copied from https://echarts.apache.org/en/option.html#tooltip.position
-      position(pos, params, dom, rect, size) {
-        // tooltip will be fixed on the right if mouse hovering on the left,
-        // and on the left if hovering on the right.
-        const obj = { top: 60 };
-        const mouseIsLeft = pos[0] < size.viewSize[0] / 2;
-        obj[['left', 'right'][+mouseIsLeft]!] = mouseIsLeft ? MARGINRIGHT : MARGINLEFT;
-        return obj;
-      },
-    },
-    axisPointer: {
-      link: [{ xAxisIndex: 'all' }],
-      label: {
-        backgroundColor: '#777',
-      },
-    },
-
-    dataZoom: [
-      // Start values are recalculated once the data is known
-      {
-        type: 'inside',
-        xAxisIndex: [0, 1],
-        start: 80,
-        end: 100,
-      },
-      {
-        xAxisIndex: [0, 1],
-        bottom: 10,
-        start: 80,
-        end: 100,
-        ...dataZoomPartial,
-      },
-    ],
-    // visualMap: {
-    //   //  TODO: this would allow to colorize volume bars (if we'd want this)
-    //   //  Needs green / red indicator column in data.
-    //   show: true,
-    //   seriesIndex: 1,
-    //   dimension: 5,
-    //   pieces: [
-    //     {
-    //       max: 500000.0,
-    //       color: downColor,
-    //     },
-    //     {
-    //       min: 500000.0,
-    //       color: upColor,
-    //     },
-    //   ],
-    // },
-  };
-
-  console.log('Initialized');
-  updateChart(true);
-}
-
-function updateSliderPosition() {
-  if (!props.sliderPosition) return;
-
-  const start = props.sliderPosition.startValue - props.dataset.timeframe_ms * 40;
-  const end = props.sliderPosition.endValue
-    ? props.sliderPosition.endValue + props.dataset.timeframe_ms * 40
-    : props.sliderPosition.startValue + props.dataset.timeframe_ms * 80;
-  if (candleChart.value) {
-    candleChart.value.dispatchAction({
-      type: 'dataZoom',
-      dataZoomIndex: 0,
-      startValue: start,
-      endValue: end,
-    });
+function currentData() {
+  const snapshot = rawData();
+  const latestSnapshot = snapshot.at(-1)?.timestamp ?? 0;
+  const byTime = new Map(snapshot.map((bar) => [bar.timestamp, bar]));
+  for (const [timestamp, bar] of marketBars) {
+    if (timestamp < latestSnapshot && byTime.has(timestamp)) {
+      marketBars.delete(timestamp);
+    } else {
+      byTime.set(timestamp, { ...byTime.get(timestamp), ...bar });
+    }
   }
+  const data = [...byTime.values()].sort((a, b) => a.timestamp - b.timestamp);
+  lastRawBar = data.at(-1);
+  return chartType.value === 'heikin_ashi' ? convertHeikinAshi(data) : data;
 }
 
-// const buyData = ref<number[][]>([]);
-// const sellData = ref<number[][]>([]);
-// createSignalData(colDate: number, colOpen: number, colBuy: number, colSell: number): void {
-// Calculate Buy and sell Series
-// if (!this.signalsCalculated) {
-//   // Generate Buy and sell array (using open rate to display marker)
-//   for (let i = 0, len = this.dataset.data.length; i < len; i += 1) {
-//     if (this.dataset.data[i][colBuy] === 1) {
-//       this.buyData.push([this.dataset.data[i][colDate], this.dataset.data[i][colOpen]]);
-//     }
-//     if (this.dataset.data[i][colSell] === 1) {
-//       this.sellData.push([this.dataset.data[i][colDate], this.dataset.data[i][colOpen]]);
-//     }
-//   }
-//   this.signalsCalculated = true;
-// }
-// }
-
-onMounted(() => {
-  initializeChartOptions();
-});
-
-watch([() => props.useUTC, () => props.theme, () => props.plotConfig], () =>
-  initializeChartOptions(),
-);
-
-watch([() => props.dataset, () => props.heikinAshi, () => props.showMarkArea], () => updateChart());
+function updateLiveBar(bar: KLineData) {
+  if (!pushBar || (lastRawBar && bar.timestamp < lastRawBar.timestamp)) return;
+  const replacing = bar.timestamp === lastRawBar?.timestamp;
+  marketBars.set(bar.timestamp, bar);
+  lastRawBar = replacing ? { ...lastRawBar, ...bar } : bar;
+  if (chartType.value !== 'heikin_ashi') {
+    pushBar(lastRawBar);
+    return;
+  }
+  const displayed = chart.value?.getDataList();
+  const previous = displayed?.at(replacing ? -2 : -1);
+  const { open, high, low, close } = lastRawBar;
+  const haOpen = previous ? (previous.open + previous.close) / 2 : (open + close) / 2;
+  const haClose = (open + high + low + close) / 4;
+  pushBar({
+    ...lastRawBar,
+    open: haOpen,
+    close: haClose,
+    high: Math.max(high, haOpen, haClose),
+    low: Math.min(low, haOpen, haClose),
+  });
+}
 
 watch(
-  () => props.sliderPosition,
-  () => updateSliderPosition(),
+  [() => props.liveMarket?.socket, liveEnabled],
+  ([socket, enabled], _previous, onCleanup) => {
+    const market = props.liveMarket;
+    if (!socket || !market || !enabled || props.dataset.timeframe_ms <= 0) return;
+    onCleanup(
+      subscribeBinanceCandles(
+        market,
+        props.dataset.timeframe_ms,
+        () => lastRawBar?.timestamp,
+        updateLiveBar,
+        (state) => {
+          connection.value = state;
+        },
+      ),
+    );
+  },
+  { immediate: true, flush: 'post' },
+);
+
+function pricePrecision(data: KLineData[]) {
+  return Math.min(
+    12,
+    Math.max(
+      2,
+      ...data.slice(-100).map((item) => {
+        const fraction = item.close.toString().split('.')[1];
+        return fraction?.length ?? 0;
+      }),
+    ),
+  );
+}
+
+function candleType(): CandleType {
+  if (chartType.value === 'heikin_ashi') return 'candle_solid';
+  if (chartType.value === 'line') return 'area';
+  return chartType.value;
+}
+
+function styles() {
+  const dark = props.theme === 'dark';
+  const text = dark ? '#a7b1bc' : '#5e6673';
+  const grid = dark ? '#1f2933' : '#e6e8eb';
+  return {
+    backgroundColor: dark ? '#0b0e11' : '#ffffff',
+    grid: {
+      horizontal: { color: grid, style: 'dashed' as const },
+      vertical: { color: grid, style: 'dashed' as const },
+    },
+    candle: {
+      type: candleType(),
+      bar: {
+        upColor: props.colorUp,
+        downColor: props.colorDown,
+        noChangeColor: text,
+        upBorderColor: props.colorUp,
+        downBorderColor: props.colorDown,
+        noChangeBorderColor: text,
+        upWickColor: props.colorUp,
+        downWickColor: props.colorDown,
+        noChangeWickColor: text,
+      },
+      area: {
+        lineColor: props.colorUp,
+        lineSize: 2,
+        smooth: false,
+        backgroundColor:
+          chartType.value === 'line'
+            ? [{ offset: 0, color: 'rgba(0,0,0,0)' }]
+            : [
+                { offset: 0, color: `${props.colorUp}55` },
+                { offset: 1, color: `${props.colorUp}05` },
+              ],
+      },
+      tooltip: { showRule: 'always' as const, showType: 'standard' as const },
+    },
+    indicator: {
+      tooltip: { showRule: 'always' as const, showType: 'standard' as const },
+      lastValueMark: { show: true },
+    },
+    xAxis: { tickText: { color: text }, axisLine: { color: grid } },
+    yAxis: { tickText: { color: text }, axisLine: { color: grid } },
+    separator: { color: grid, activeBackgroundColor: dark ? '#202934' : '#eef0f2' },
+    crosshair: {
+      horizontal: { line: { color: text }, text: { backgroundColor: '#2b3139' } },
+      vertical: { line: { color: text }, text: { backgroundColor: '#2b3139' } },
+    },
+  };
+}
+
+function persistState() {
+  localStorage.setItem(
+    chartStateKey,
+    JSON.stringify({
+      chartType: chartType.value,
+      indicators: activeIndicators.value,
+      overlayMode: overlayMode.value,
+    }),
+  );
+}
+
+function restoreState() {
+  try {
+    const state = JSON.parse(localStorage.getItem(chartStateKey) ?? '{}') as {
+      chartType?: PriceChartType;
+      indicators?: string[];
+      overlayMode?: OverlayMode;
+    };
+    if (chartTypeOptions.some((option) => option.value === state.chartType))
+      chartType.value = state.chartType!;
+    if (Array.isArray(state.indicators)) {
+      activeIndicators.value = state.indicators.filter((name) => indicatorOptions.includes(name));
+    }
+    if (state.overlayMode) overlayMode.value = state.overlayMode;
+  } catch {
+    /* Ignore invalid preferences. */
+  }
+}
+
+function createIndicator(name: string) {
+  if (!chart.value) return;
+  if (mainPaneIndicators.has(name)) {
+    chart.value.createIndicator(
+      { name, paneId: 'candle_pane', ...(name === 'MA' ? { calcParams: [7, 25, 99] } : {}) },
+      true,
+    );
+  } else chart.value.createIndicator(name, true);
+}
+
+function strategyIndicatorName(label: string, columns: string[]) {
+  const signature = `${label}:${columns.join(',')}`;
+  let hash = 0;
+  for (const character of signature) hash = (hash * 31 + character.charCodeAt(0)) | 0;
+  return `FREQ_${Math.abs(hash)}`;
+}
+
+function createStrategyIndicator(
+  label: string,
+  definitions: Record<string, { color?: string; type?: string }>,
+  mainPane: boolean,
+) {
+  if (!chart.value) return;
+  const columns = Object.keys(definitions).filter((key) => props.dataset.columns.includes(key));
+  if (columns.length === 0) return;
+  const colors = ['#2962ff', '#ff6d00', '#ab47bc', '#26a69a', '#ef5350', '#f0b90b'];
+  const name = strategyIndicatorName(label, columns);
+  const template: IndicatorTemplate<Record<string, number | null>> = {
+    name,
+    shortName: label,
+    series: mainPane ? 'price' : 'normal',
+    precision: pricePrecision(rawData()),
+    shouldOhlc: false,
+    calc: (dataList) =>
+      dataList.map((item) =>
+        Object.fromEntries(
+          columns.map((key) => {
+            const value = Number(item[key]);
+            return [key, Number.isFinite(value) ? value : null];
+          }),
+        ),
+      ),
+    figures: columns.map((key, index) => ({
+      key,
+      title: key,
+      type: definitions[key]?.type === 'scatter' ? 'circle' : 'line',
+      styles: () => ({
+        color: definitions[key]?.color ?? colors[index % colors.length],
+        size: definitions[key]?.type === 'bar' ? 2 : 1,
+        style: 'solid',
+      }),
+    })),
+  };
+  registerIndicator(template);
+  chart.value.createIndicator(mainPane ? { name, paneId: 'candle_pane' } : { name }, true);
+}
+
+function createStrategyIndicators() {
+  createStrategyIndicator('Strategy', props.plotConfig.main_plot, true);
+  Object.entries(props.plotConfig.subplots).forEach(([label, definitions]) =>
+    createStrategyIndicator(label, definitions, false),
+  );
+}
+
+function addIndicator(name = selectedIndicator.value) {
+  if (!chart.value || activeIndicators.value.includes(name)) return;
+  activeIndicators.value.push(name);
+  createIndicator(name);
+  persistState();
+}
+
+function removeIndicator(name: string) {
+  chart.value?.removeIndicator({ name });
+  activeIndicators.value = activeIndicators.value.filter((item) => item !== name);
+  persistState();
+}
+
+function createTradeMarkers() {
+  if (!chart.value) return;
+  chart.value.removeOverlay({ groupId: 'trade-markers' });
+  props.trades
+    .filter((trade) => trade.pair === props.dataset.pair)
+    .forEach((trade) => {
+      chart.value?.createOverlay({
+        name: 'simpleAnnotation',
+        groupId: 'trade-markers',
+        lock: true,
+        points: [{ timestamp: trade.open_timestamp, value: trade.open_rate }],
+        extendData: `${trade.is_short ? 'Short' : 'Long'} entry`,
+      });
+      if (trade.close_timestamp && trade.close_rate)
+        chart.value?.createOverlay({
+          name: 'simpleAnnotation',
+          groupId: 'trade-markers',
+          lock: true,
+          points: [{ timestamp: trade.close_timestamp, value: trade.close_rate }],
+          extendData: `Exit ${trade.profit_pct == null ? '' : `${trade.profit_pct.toFixed(2)}%`}`,
+        });
+    });
+}
+
+function persistDrawings() {
+  const drawings: SavedDrawing[] = (
+    chart.value?.getOverlays({ groupId: 'user-drawings' }) ?? []
+  ).map((overlay: Overlay) => ({
+    name: overlay.name,
+    points: overlay.points,
+    extendData: overlay.extendData,
+  }));
+  localStorage.setItem(drawingStorageKey.value, JSON.stringify(drawings));
+}
+
+function drawingOptions(drawing: SavedDrawing) {
+  return {
+    ...drawing,
+    groupId: 'user-drawings',
+    lock: drawingsLocked.value,
+    mode: overlayMode.value,
+    onDrawEnd: persistDrawings,
+    onPressedMoveEnd: persistDrawings,
+    onRemoved: persistDrawings,
+  };
+}
+
+function restoreDrawings() {
+  try {
+    const drawings = JSON.parse(
+      localStorage.getItem(drawingStorageKey.value) ?? '[]',
+    ) as SavedDrawing[];
+    drawings.forEach((drawing) => chart.value?.createOverlay(drawingOptions(drawing)));
+  } catch {
+    /* Ignore invalid saved drawings. */
+  }
+}
+
+function startDrawing() {
+  chart.value?.createOverlay(drawingOptions({ name: selectedDrawing.value, points: [] }));
+}
+
+function undoDrawing() {
+  const drawings = chart.value?.getOverlays({ groupId: 'user-drawings' }) ?? [];
+  const last = drawings.at(-1);
+  if (last) chart.value?.removeOverlay({ id: last.id });
+  persistDrawings();
+}
+
+function clearDrawings() {
+  chart.value?.removeOverlay({ groupId: 'user-drawings' });
+  persistDrawings();
+}
+
+function toggleDrawingLock() {
+  drawingsLocked.value = !drawingsLocked.value;
+  chart.value?.overrideOverlay({ groupId: 'user-drawings', lock: drawingsLocked.value });
+}
+
+function resetView() {
+  if (!chart.value || !chartHost.value) return;
+  const visibleBars = Math.min(Math.max(props.startCandleCount, 100), 180);
+  chart.value.setBarSpace(Math.max(4, Math.min(10, chartHost.value.clientWidth / visibleBars)));
+  chart.value.scrollToRealTime(250);
+}
+
+function downloadImage() {
+  if (!chart.value) return;
+  const link = document.createElement('a');
+  link.href = chart.value.getConvertPictureUrl(true, 'png');
+  link.download = `${props.dataset.pair.replaceAll('/', '-')}-${props.dataset.timeframe}.png`;
+  link.click();
+}
+
+async function toggleFullscreen() {
+  if (!chartShell.value) return;
+  if (document.fullscreenElement) await document.exitFullscreen();
+  else await chartShell.value.requestFullscreen();
+}
+
+function onFullscreenChange() {
+  isFullscreen.value = document.fullscreenElement === chartShell.value;
+  nextTick(() => chart.value?.resize());
+}
+
+function initializeChart() {
+  if (!chartHost.value) return;
+  if (chart.value) dispose(chart.value);
+  pushBar = undefined;
+  chart.value = init(chartHost.value, {
+    timezone: props.useUTC ? 'UTC' : Intl.DateTimeFormat().resolvedOptions().timeZone,
+    styles: styles(),
+    zoomAnchor: 'cursor',
+    layout: {
+      barSpaceLimit: { min: 3, max: 14 },
+      pane: { minHeight: 70, dragEnabled: true },
+    },
+  });
+  if (!chart.value) return;
+  chart.value.setDataLoader({
+    getBars: ({ callback }) => callback(currentData(), false),
+    subscribeBar: ({ callback }) => {
+      pushBar = callback;
+    },
+    unsubscribeBar: () => {
+      pushBar = undefined;
+    },
+  });
+  chart.value.setSymbol({
+    ticker: props.dataset.pair,
+    pricePrecision: pricePrecision(rawData()),
+    volumePrecision: 2,
+  });
+  chart.value.setPeriod(timeframeToPeriod(props.dataset.timeframe));
+  chart.value.setOffsetRightDistance(70);
+  chart.value.setLeftMinVisibleBarCount(20);
+  chart.value.setRightMinVisibleBarCount(2);
+  activeIndicators.value.forEach(createIndicator);
+  createStrategyIndicators();
+  createTradeMarkers();
+  restoreDrawings();
+  nextTick(resetView);
+}
+
+onMounted(() => {
+  restoreState();
+  initializeChart();
+  resizeObserver.value = new ResizeObserver(() => chart.value?.resize());
+  if (chartHost.value) resizeObserver.value.observe(chartHost.value);
+  document.addEventListener('fullscreenchange', onFullscreenChange);
+});
+
+onBeforeUnmount(() => {
+  resizeObserver.value?.disconnect();
+  document.removeEventListener('fullscreenchange', onFullscreenChange);
+  if (chart.value) dispose(chart.value);
+});
+
+watch(
+  () => props.dataset,
+  () => {
+    const instance = chart.value;
+    if (!instance) return;
+    const bars = instance.getDataList();
+    const { to } = instance.getVisibleRange();
+    const right = to < bars.length ? bars[to - 1]?.timestamp : undefined;
+    instance.resetData();
+    if (right !== undefined) instance.scrollToTimestamp(right);
+  },
+);
+watch(() => props.trades, createTradeMarkers);
+watch(
+  () => props.plotConfig,
+  () => nextTick(initializeChart),
+  { deep: true },
+);
+watch([() => props.theme, () => props.colorUp, () => props.colorDown], () =>
+  chart.value?.setStyles(styles()),
+);
+watch(chartType, () => {
+  persistState();
+  nextTick(initializeChart);
+});
+watch(overlayMode, persistState);
+watch(
+  () => props.heikinAshi,
+  (enabled) => {
+    if (enabled !== (chartType.value === 'heikin_ashi'))
+      chartType.value = enabled ? 'heikin_ashi' : 'candle_solid';
+  },
 );
 </script>
 
 <template>
-  <div class="h-full w-full">
-    <ECharts v-if="hasData" ref="candleChart" :theme="theme" autoresize manual-update />
+  <div
+    ref="chartShell"
+    class="pro-chart-shell h-full w-full"
+    :class="theme === 'dark' ? 'chart-dark' : 'chart-light'"
+  >
+    <div class="chart-toolbar" role="toolbar" aria-label="Professional chart controls">
+      <button
+        v-if="liveMarket"
+        type="button"
+        :aria-pressed="liveEnabled"
+        :title="liveMarket.label"
+        @click="liveEnabled = !liveEnabled"
+      >
+        {{ liveEnabled ? connection : 'Live paused' }}
+      </button>
+      <select v-model="chartType" title="Chart type" aria-label="Chart type">
+        <option v-for="option in chartTypeOptions" :key="option.value" :value="option.value">
+          {{ option.label }}
+        </option>
+      </select>
+      <div class="toolbar-group">
+        <select v-model="selectedIndicator" title="Technical indicator" aria-label="Indicator">
+          <option v-for="indicator in indicatorOptions" :key="indicator" :value="indicator">
+            {{ indicator }}
+          </option>
+        </select>
+        <button type="button" title="Add indicator" @click="addIndicator()">+ Indicator</button>
+      </div>
+      <div class="toolbar-group">
+        <select v-model="selectedDrawing" title="Drawing tool" aria-label="Drawing tool">
+          <optgroup v-for="group in drawingGroups" :key="group.label" :label="group.label">
+            <option v-for="item in group.items" :key="item[1]" :value="item[1]">
+              {{ item[0] }}
+            </option>
+          </optgroup>
+        </select>
+        <button type="button" title="Start drawing" @click="startDrawing">Draw</button>
+      </div>
+      <select v-model="overlayMode" title="Drawing magnet mode" aria-label="Magnet mode">
+        <option value="normal">Magnet off</option>
+        <option value="weak_magnet">Weak magnet</option>
+        <option value="strong_magnet">Strong magnet</option>
+      </select>
+      <div class="toolbar-actions">
+        <button type="button" title="Undo last drawing" @click="undoDrawing">Undo</button>
+        <button type="button" :class="{ active: drawingsLocked }" @click="toggleDrawingLock">
+          {{ drawingsLocked ? 'Unlock' : 'Lock' }}
+        </button>
+        <button type="button" title="Clear drawings" @click="clearDrawings">Clear</button>
+        <button type="button" title="Reset zoom and scroll" @click="resetView">Reset</button>
+        <button type="button" title="Download chart image" @click="downloadImage">Snapshot</button>
+        <button type="button" title="Toggle full screen" @click="toggleFullscreen">
+          {{ isFullscreen ? 'Exit' : 'Full screen' }}
+        </button>
+      </div>
+    </div>
+    <div v-if="activeIndicators.length" class="active-indicators" aria-label="Active indicators">
+      <span v-for="indicator in activeIndicators" :key="indicator" class="indicator-chip">
+        {{ indicator }}
+        <button
+          type="button"
+          :aria-label="`Remove ${indicator}`"
+          @click="removeIndicator(indicator)"
+        >
+          ×
+        </button>
+      </span>
+    </div>
+    <div ref="chartHost" class="chart-host" />
   </div>
 </template>
 
-<style scoped lang="css">
-.echarts {
-  width: 100%;
-  min-height: 200px;
-  /* TODO: height calculation is not working correctly - uses min-height for now */
-  /* height: 600px; */
-  height: 100%;
+<style scoped>
+.pro-chart-shell {
+  display: flex;
+  min-height: 360px;
+  flex-direction: column;
+  overflow: hidden;
+  color: #5e6673;
+  background: #fff;
+}
+.pro-chart-shell.chart-dark {
+  color: #a7b1bc;
+  background: #0b0e11;
+}
+.pro-chart-shell:fullscreen {
+  padding: 8px;
+}
+.chart-toolbar {
+  z-index: 3;
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+  overflow-x: auto;
+}
+.toolbar-group,
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.toolbar-actions {
+  margin-left: auto;
+}
+.chart-toolbar select,
+.chart-toolbar button,
+.indicator-chip {
+  height: 30px;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-radius: 4px;
+  color: inherit;
+  background: color-mix(in srgb, currentColor 5%, transparent);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.chart-toolbar select {
+  min-width: 105px;
+  padding: 0 24px 0 8px;
+}
+.chart-toolbar button {
+  padding: 0 9px;
+  cursor: pointer;
+}
+.chart-toolbar button:hover,
+.chart-toolbar button.active {
+  color: #f0b90b;
+  border-color: #f0b90b;
+  background: color-mix(in srgb, #f0b90b 12%, transparent);
+}
+.active-indicators {
+  z-index: 2;
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  overflow-x: auto;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 10%, transparent);
+}
+.indicator-chip {
+  display: inline-flex;
+  height: 23px;
+  align-items: center;
+  gap: 5px;
+  padding-left: 7px;
+}
+.indicator-chip button {
+  height: 21px;
+  padding: 0 6px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+.chart-host {
+  min-width: 0;
+  min-height: 280px;
+  flex: 1 1 auto;
+}
+@media (max-width: 768px) {
+  .chart-toolbar {
+    align-items: flex-start;
+  }
+  .toolbar-actions {
+    margin-left: 0;
+  }
 }
 </style>

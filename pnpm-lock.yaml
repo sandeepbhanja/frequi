@@ -176,6 +176,9 @@ importers:
       '@internationalized/date':
         specifier: ^3.12.4
         version: 3.12.4
+      '@klinecharts/extension':
+        specifier: ^0.1.0
+        version: 0.1.0(klinecharts@10.0.3)
       '@noction/vue-draggable-grid':
         specifier: 1.9.16
         version: 1.9.16(@interactjs/core@1.10.28(@interactjs/utils@1.10.28))(@interactjs/utils@1.10.28)(typescript@6.0.3)(vue@3.5.45(typescript@6.0.3))
@@ -209,6 +212,9 @@ importers:
       humanize-duration:
         specifier: ^3.35.1
         version: 3.35.1
+      klinecharts:
+        specifier: 10.0.3
+        version: 10.0.3
       ofetch:
         specifier: ^1.5.1
         version: 1.5.1
@@ -721,6 +727,11 @@ packages:
 
   '@keyv/serialize@1.1.1':
     resolution: {integrity: sha512-dXn3FZhPv0US+7dtJsIi2R+c7qWYiReoEh5zUntWCf4oSpMNib8FDhSoed6m3QyZdx5hK7iLFkYk3rNxwt8vTA==}
+
+  '@klinecharts/extension@0.1.0':
+    resolution: {integrity: sha512-erJtbq4MBpa1EGYgjR7TNZQ9Rh0RoNGRt4lHFQlCjNolETsA6Xx6+puj7Q7JLTT4rWS4SZJ/UXh2I/4+aRZsUQ==}
+    peerDependencies:
+      klinecharts: '>=10.0.0'
 
   '@noction/vue-draggable-grid@1.9.16':
     resolution: {integrity: sha512-aXezq1P2tBNnKwlo10JTmVvNlrV9gej0h87CMMmFbstkn8fm7XTyCmtz9b3spDrnJKtyvBxsfaW1ZiW9weI3AA==}
@@ -2348,6 +2359,9 @@ packages:
   keyv@5.6.0:
     resolution: {integrity: sha512-CYDD3SOtsHtyXeEORYRx2qBtpDJFjRTGXUtmNEMGyzYOKj1TE3tycdlho7kA1Ufx9OYWZzg52QFBGALTirzDSw==}
 
+  klinecharts@10.0.3:
+    resolution: {integrity: sha512-phvf5CyS7oGE46nuC+nxQxl9D+8+5w8q3reExh0oNeMV1Jws4X0CMHNkOI9xlNA/XWctNS5whZ3PqIJi8YM2Tw==}
+
   klona@2.0.6:
     resolution: {integrity: sha512-dhG34DXATL5hSxJbIexCft8FChFXtmskoZYnoPWjXQuebWYCNkVeV3KkGegCK9CP1oswI/vQibS2GY7Em/sJJA==}
     engines: {node: '>= 8'}
@@ -3860,6 +3874,10 @@ snapshots:
       keyv: 5.6.0
 
   '@keyv/serialize@1.1.1': {}
+
+  '@klinecharts/extension@0.1.0(klinecharts@10.0.3)':
+    dependencies:
+      klinecharts: 10.0.3
 
   '@noction/vue-draggable-grid@1.9.16(@interactjs/core@1.10.28(@interactjs/utils@1.10.28))(@interactjs/utils@1.10.28)(typescript@6.0.3)(vue@3.5.45(typescript@6.0.3))':
     dependencies:
@@ -5618,6 +5636,8 @@ snapshots:
   keyv@5.6.0:
     dependencies:
       '@keyv/serialize': 1.1.1
+
+  klinecharts@10.0.3: {}
 
   klona@2.0.6: {}
 

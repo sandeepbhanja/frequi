@@ -1,10 +1,60 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type WebSocketRoute } from '@playwright/test';
 import { setLoginInfo, defaultMocks } from './helpers';
 
 test.describe('Chart', () => {
+  let stream: WebSocketRoute | undefined;
+
   test.beforeEach(async ({ page }) => {
+    stream = undefined;
+    await page.routeWebSocket('wss://data-stream.binance.vision/ws/btcusdt@kline_1m', (socket) => {
+      stream = socket;
+    });
     await defaultMocks(page);
     await setLoginInfo(page);
+  });
+
+  test('streams candles in place and backfills after reconnecting', async ({ page }) => {
+    const lastOpen = 1683571560000; // Last opening timestamp in the pair candle fixture.
+    const minute = 60_000;
+    const kline = (t: number, close: string) =>
+      JSON.stringify({
+        e: 'kline',
+        k: { s: 'BTCUSDT', i: '1m', t, o: '27500', h: '27600', l: '27400', c: close, v: '50' },
+      });
+    await page.route('https://data-api.binance.vision/api/v3/klines?*', (route) =>
+      route.fulfill({
+        headers: { 'access-control-allow-origin': '*' },
+        json: [
+          [lastOpen + minute, '27500', '27600', '27400', '27550', '50'],
+          [lastOpen + 2 * minute, '27550', '27600', '27400', '27575', '55'],
+        ],
+      }),
+    );
+
+    await page.goto('/graph');
+    const toolbar = page.getByRole('toolbar', { name: 'Professional chart controls' });
+    await expect(toolbar.getByRole('button', { name: 'Connecting', exact: true })).toBeVisible();
+    const canvas = await page.locator('.pro-chart-shell canvas').first().elementHandle();
+    await expect.poll(() => Boolean(stream)).toBe(true);
+    stream!.send(kline(lastOpen, '27510'));
+    await expect(toolbar.getByRole('button', { name: 'Live', exact: true })).toBeVisible();
+    stream!.send(kline(lastOpen + minute, '27530'));
+    stream!.close();
+    await expect(toolbar.getByRole('button', { name: 'Reconnecting', exact: true })).toBeVisible();
+    const disconnected = stream;
+    await expect.poll(() => stream !== disconnected).toBe(true);
+    const backfill = page.waitForRequest('https://data-api.binance.vision/api/v3/klines?*');
+    stream!.send(kline(lastOpen + 3 * minute, '27580'));
+    expect(new URL((await backfill).url()).searchParams.get('startTime')).toBe(
+      String(lastOpen + minute),
+    );
+    await expect(toolbar.getByRole('button', { name: 'Live', exact: true })).toBeVisible();
+    expect(await canvas!.evaluate((element) => element.isConnected)).toBe(true);
+    await toolbar.getByRole('button', { name: 'Live', exact: true }).click();
+    await expect(toolbar.getByRole('button', { name: 'Live paused' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
   });
   test('Chart page', async ({ page }) => {
     await Promise.all([
@@ -73,21 +123,12 @@ test.describe('Chart', () => {
     // Close Plot configurator
     await page.getByRole('button', { name: 'Close' }).click();
 
-    await expect(page.locator('canvas')).toHaveScreenshot(
-      'Chart-Plot-with_BollingerBands-Dark.png',
-      {
-        threshold: 0.15,
-        maxDiffPixelRatio: 0.15,
-      },
-    );
+    const professionalChart = page.locator('.pro-chart-shell');
+    await expect(professionalChart).toBeVisible();
+    await expect(professionalChart.getByRole('button', { name: '+ Indicator' })).toBeVisible();
+    await expect(professionalChart.locator('canvas')).not.toHaveCount(0);
 
     await page.getByRole('button', { name: 'Toggle Night Mode' }).click();
-
-    await expect(page.locator('canvas')).toHaveScreenshot('Chart-Plot-with_BollingerBands.png', {
-      threshold: 0.15,
-      maxDiffPixelRatio: 0.15,
-    });
-    // Should assert if indicators have been set
-    // but it's a canvas ...
+    await expect(professionalChart).toHaveClass(/chart-light/);
   });
 });

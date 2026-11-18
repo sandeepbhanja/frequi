@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { ChartSliderPosition, PairHistory, Trade } from '@/types';
 import { LoadingStatus } from '@/types';
+import { binanceCandleMarket } from '@/utils/charts/binanceCandles';
 
 const props = withDefaults(
   defineProps<{
@@ -29,6 +30,12 @@ const settingsStore = useSettingsStore();
 const colorStore = useColorStore();
 const botStore = useBotStore();
 const plotStore = usePlotConfigStore();
+
+const liveMarket = computed(() => {
+  if (props.historicView || botStore.activeBot.isWebserverMode) return;
+  const { exchange, trading_mode } = botStore.activeBot.botState;
+  return binanceCandleMarket(exchange ?? '', props.pair, props.timeframe, trading_mode);
+});
 
 const dataset = computed((): PairHistory | undefined => {
   if (props.historicView) {
@@ -162,6 +169,8 @@ watch(
         <CandleChart
           v-if="hasDataset && dataset"
           :dataset="dataset"
+          :live-market="liveMarket"
+          :key="`${botStore.selectedBot}:${liveMarket?.socket ?? props.timeframe}`"
           :trades="trades"
           :plot-config="plotStore.plotConfig"
           :heikin-ashi="settingsStore.useHeikinAshiCandles"
